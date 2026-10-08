@@ -30,7 +30,16 @@ module operand_buffer #(
     input  logic [ADDR_W-1:0]  rd_addr,
     output logic [WIDTH-1:0]   rd_data
 );
-
+    // ------------------------------------------------------------------
+    // Parameter legality checks (run once, at time 0)
+    // ------------------------------------------------------------------
+    initial begin
+        if (WIDTH < 1)
+            $fatal(1, "operand_buffer: WIDTH (%0d) must be >= 1", WIDTH);
+        if (DEPTH < 1)
+            $fatal(1, "operand_buffer: DEPTH (%0d) must be >= 1", DEPTH);
+    end
+    
     logic [WIDTH-1:0] mem [DEPTH];
 
     always_ff @(posedge clk) begin

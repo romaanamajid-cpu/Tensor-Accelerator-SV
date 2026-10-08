@@ -9,3 +9,4 @@ __pycache__/
 mac_sim
 sim/sweep/
 sim/sweep/
+sim/mut/

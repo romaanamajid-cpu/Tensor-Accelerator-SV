@@ -24,6 +24,16 @@ module skew_buffer #(
     output logic        [LANES-1:0]                 out_valid
 );
 
+    // ------------------------------------------------------------------
+    // Parameter legality checks (run once, at time 0)
+    // ------------------------------------------------------------------
+    initial begin
+        if (LANES < 1)
+            $fatal(1, "skew_buffer: LANES (%0d) must be >= 1", LANES);
+        if (DATA_WIDTH < 1)
+            $fatal(1, "skew_buffer: DATA_WIDTH (%0d) must be >= 1", DATA_WIDTH);
+    end
+
     generate
         for (genvar i = 0; i < LANES; i++) begin : g_lane
             if (i == 0) begin : g_no_delay

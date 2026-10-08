@@ -89,6 +89,18 @@ module tile_ctrl #(
     logic           last_r;     // the slice on the wire is the final one
     logic [M_W-1:0] row_cnt;    // row being sent in READOUT
 
+    // ------------------------------------------------------------------
+    // Parameter legality checks (run once, at time 0)
+    // ------------------------------------------------------------------
+    initial begin
+        if (ROWS < 1)
+            $fatal(1, "tile_ctrl: ROWS (%0d) must be >= 1", ROWS);
+        if (COLS < 1)
+            $fatal(1, "tile_ctrl: COLS (%0d) must be >= 1", COLS);
+        if (K_DEPTH < 1)
+            $fatal(1, "tile_ctrl: K_DEPTH (%0d) must be >= 1", K_DEPTH);
+    end
+
     // A job_start is only acceptable with legal settings
     logic settings_ok;
     logic err_r;
@@ -112,6 +124,30 @@ module tile_ctrl #(
     assign eng_tile_n     = n_r;
     assign eng_in_valid   = (state == S_STREAM);
     assign eng_in_last    = last_r;
+
+    // ------------------------------------------------------------------
+    // Runtime self-checks (simulation only, hidden from synthesis). Rules that
+    // hold on every cycle whatever the host does: a violation is a bug here.
+    // ------------------------------------------------------------------
+`ifndef SYNTHESIS
+    always @(posedge clk) begin
+        if (rst_n === 1'b1) begin
+            if (state > S_READOUT)
+                $fatal(1, "tile_ctrl: illegal state %0d", state);
+            // A running job always has settings that passed the limit checks
+            if (state != S_IDLE &&
+                (k_len == '0 || k_len > K_DEPTH || m_r > ROWS || n_r > COLS))
+                $fatal(1, "tile_ctrl: job running with illegal settings k=%0d m=%0d n=%0d",
+                       k_len, m_r, n_r);
+            // The slice counter never runs past the job length
+            if (state == S_STREAM && k_cnt > k_len)
+                $fatal(1, "tile_ctrl: slice counter %0d ran past K=%0d", k_cnt, k_len);
+            // Readout only sends rows that exist
+            if (res_valid && row_cnt >= m_r)
+                $fatal(1, "tile_ctrl: readout row %0d >= m=%0d", row_cnt, m_r);
+        end
+    end
+`endif
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

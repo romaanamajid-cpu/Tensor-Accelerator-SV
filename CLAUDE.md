@@ -18,8 +18,8 @@ The core of the design is a parameterised MAC-array matrix-multiplication accele
 - [x] **M4** — Matrix engine
 - [x] **M5** — Control / FSM
 - [x] **M6** — Parameterisation
-- [ ] **M7** — Advanced verification *(current milestone)*
-- [ ] **M8** — FPGA implementation
+- [x] **M7** — Advanced verification
+- [ ] **M8** — FPGA implementation *(current milestone)*
 - [ ] **M9** — Performance analysis
 - [ ] **M10** — PPA comparison
 - [ ] **M11** — (stretch) SoC integration
@@ -28,7 +28,7 @@ The core of the design is a parameterised MAC-array matrix-multiplication accele
 > Update the checkboxes above as each milestone is completed — this is the single source of truth for project status.
 
 ## Current status
-M1, M2, M3, M4, M5 and M6 complete. Starting **M7: Advanced verification**.
+M1, M2, M3, M4, M5, M6 and M7 complete. Next: **M8: FPGA implementation**.
 
 M1 — MAC unit decisions:
 - Data width: 8-bit signed operands (INT8-style), parameterised via `DATA_WIDTH`
@@ -94,6 +94,20 @@ M6 — Parameterisation (`rtl/mac_unit.sv`, `rtl/tensor_core.sv`, `tb/tensor_cor
 - Known limits: the sweep is only as strong as the M5 testbench (no new stimulus); DATA_WIDTH is limited to 31 bits and ACC_WIDTH to 64 by the testbench's integer / `longint` model; checks live only in `mac_unit` and `tensor_core`, not in the intermediate modules (skew_buffer, operand_buffer, etc. still accept degenerate values on their own); the sweep needs `bash` and `iverilog` on the PATH
 - Handed to later milestones: constrained-random / coverage-driven extensions and mutation re-runs at non-default sizes and widths (M7); sync-vs-async reset and block-RAM mapping (M8); per-parameter PPA numbers (M9/M10)
 - Run (from the repo root): `bash scripts/sweep.sh`
+
+M7 — Advanced verification (`tb/tensor_core_cr_tb.sv`, `tb/matrix_engine_tb.sv`, `scripts/mutate.py`, `scripts/sweep.sh`, checks in the RTL):
+- Mutation harness: `scripts/mutate.py` injects one bug at a time into a temp copy of the RTL (39 mutants across mac_unit, mac_pe, mac_array, skew_buffer, matrix_engine, tile_ctrl, tensor_core) and runs a testbench against it. K = killed, S = survived, I = does not compile. Options: `--suite` (8 configurations from 1x1 K1 d2/a4 up to 8x8 K32, plus tight and wide accumulators), `--cfg R C K D A` (repeatable), `--tb core|cr|engine|unit`, `--only NAME`, `-j N`, `-v`, `--list`. Mutants outside a testbench's RTL files are skipped. Work dir `sim/mut/`
+- Gaps found by the first mutation runs and closed: (1) with 8-bit data / 16-bit accumulator, extreme negative operands at K=16 summed to exactly 2^16 and wrapped to 0, hiding a wrong-product bug: fixed with odd-K (1, 5) extreme tests and operand-class weighting; (2) accumulator wrap-around was only tested at unit level, and `mac_saturate` survived at engine and core level: fixed by white-box accumulator seeding; (3) the engine testbench was 8-bit only
+- Accumulator wrap-around at engine and core level: both testbenches seed every PE accumulator while idle (hierarchical write to `...g_row[i].g_col[j].u_pe.u_mac.acc_out`, core path via `dut.u_engine.u_array`) so wrap happens at any width including 8/32; the golden model uses `longint` + `wrap_acc` and counts positive / negative wraps as coverage bins
+- `matrix_engine_tb` is now width-aware (`OP_MIN` / `OP_MAX`, `wrap_acc`, `fit_op`), with odd-K extreme tests, seeded-accumulator regression (80 jobs) and directed wrap tests. 24825/24825 at 4x4 8/32, same count at every width tested
+- `tensor_core_cr_tb` (new): constrained-random, coverage-driven. Weighted job profiles (normal, extremes, partial tiles, accumulate chains, K-split chunks, wrap seeding, stalls, protocol abuse, reset mid-job, bad settings); adaptive weights (+25 for profiles whose bins are still missing); 50 manual coverage bins; closure loop with goal 3 hits per bin, min 150 / max 4000 jobs. Cycle-accurate checks as in `tensor_core_tb`. Plusargs `+seed=N +goal=N +min_jobs=N +max_jobs=N`; parameters ROWS / COLS / K_DEPTH / DATA_WIDTH / ACC_WIDTH. Default seed 42: 376 jobs, 58853/58853, all bins hit; seeds 7 and 99 also pass (110149 and 112364 checks)
+- Legality checks in the intermediate modules (`initial` + `$fatal`, time 0): skew_buffer LANES / DATA_WIDTH >= 1, operand_buffer WIDTH / DEPTH >= 1, mac_array and matrix_engine ROWS / COLS >= 1, tile_ctrl ROWS / COLS / K_DEPTH >= 1. Icarus often rejects the zero sizes at compile time first; the checks give readable messages and protect other tools
+- Runtime assertions (`$fatal`, wrapped in `ifndef SYNTHESIS`): matrix_engine (state legal, `last_pipe` one-hot and only in DRAIN, slices only accepted in STREAM, start never with tile_m > ROWS / tile_n > COLS); tile_ctrl (state legal, running job has legal k / m / n, k counter within k_len, result row within m). These also kill `eng_busy_drops_early` at core level
+- Mutation results (full suite, 8 configurations): every mutant that can be caught is caught by at least one testbench. Expected survivors, all equivalent or covered elsewhere: `mac_zero_extend` when ACC_WIDTH = 2*DATA_WIDTH (the extension bits are never used); `*_limit_off` when the field maximum equals the limit (K_DEPTH / ROWS / COLS = 2^n-1); skew / pe / array / top mutants at 1x1 and 2x2 (no long lanes or neighbours); `eng_last_without_valid` and `eng_accept_in_drain` through the core (the core never drives those cases; the engine testbench kills them in all 8 configurations); `mac_clear_loses_to_valid` through the engine and core (killed by `--tb unit`). Default core run is 34/39 killed on `tensor_core_tb` alone
+- Sweep (`bash scripts/sweep.sh`, ~70 s): the M6 checks (8 sizes, 12 widths, 4 mixed, 5 illegal, 5 unit testbenches) plus 17 `matrix_engine_tb` size / width runs, 10 `tensor_core_cr_tb` runs (3 seeds at the default, 7 further configurations) and 11 illegal-parameter refusals for the intermediate modules. Result: 72 passed, 0 failed
+- Known limits: the testbenches write accumulators and read `dut.c_tile` hierarchically (white-box, simulation only); no covergroups or SVA (Icarus 12), so coverage is manual counters and assertions are plain `$fatal` checks; the runtime assertions are inside `ifndef SYNTHESIS` and must be re-checked with the FPGA tools in M8 (Yosys / Vivado define SYNTHESIS); `mutate.py` mutants are text substitutions, so a changed RTL line can make a pattern stop matching (the script reports it as BAD MUTANT); DATA_WIDTH <= 31 and ACC_WIDTH <= 64 as in M6
+- Handed to later milestones: sync-vs-async reset decision, block-RAM mapping, SYNTHESIS guard check (M8); ping-pong buffers, readout / next-job overlap (M9)
+- Run (from the repo root): `bash scripts/sweep.sh`; random testbench: `iverilog -g2012 -o sim/tensor_core_cr.vvp rtl/mac_unit.sv rtl/mac_pe.sv rtl/mac_array.sv rtl/skew_buffer.sv rtl/matrix_engine.sv rtl/operand_buffer.sv rtl/tile_ctrl.sv rtl/tensor_core.sv tb/tensor_core_cr_tb.sv && vvp sim/tensor_core_cr.vvp +seed=42`; engine: `iverilog -g2012 -o sim/matrix_engine.vvp rtl/mac_unit.sv rtl/mac_pe.sv rtl/mac_array.sv rtl/skew_buffer.sv rtl/matrix_engine.sv tb/matrix_engine_tb.sv && vvp sim/matrix_engine.vvp`; mutation: `python3 scripts/mutate.py --suite --tb cr` (also `--tb engine`, `--tb unit`, `--tb core`)
 
 ## Conventions
 - SystemVerilog (`.sv`) for all RTL and testbenches

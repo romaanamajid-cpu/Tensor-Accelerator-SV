@@ -49,6 +49,17 @@ module matrix_engine #(
     output logic signed [ROWS-1:0][COLS-1:0][ACC_WIDTH-1:0] c_out
 );
 
+    // ------------------------------------------------------------------
+    // Parameter legality checks (run once, at time 0). The width rules
+    // (DATA_WIDTH, ACC_WIDTH) are checked inside mac_unit.
+    // ------------------------------------------------------------------
+    initial begin
+        if (ROWS < 1)
+            $fatal(1, "matrix_engine: ROWS (%0d) must be >= 1", ROWS);
+        if (COLS < 1)
+            $fatal(1, "matrix_engine: COLS (%0d) must be >= 1", COLS);
+    end
+
     // The last slice enters the array at cycle T. Its operands reach the far
     // corner PE(ROWS-1, COLS-1) at T + (ROWS-1) + (COLS-1), and the finished
     // accumulator is visible one cycle later: T + ROWS + COLS - 1.
@@ -97,6 +108,36 @@ module matrix_engine #(
             endcase
         end
     end
+
+    // ------------------------------------------------------------------
+    // Runtime self-checks (simulation only, hidden from synthesis). Each one is
+    // a rule that holds on every cycle, even when the caller misbehaves, so a
+    // violation means a bug in this module, never a bad input - except the
+    // last check, which guards the one input rule the engine relies on.
+    // ------------------------------------------------------------------
+`ifndef SYNTHESIS
+    always @(posedge clk) begin
+        if (rst_n === 1'b1) begin
+            if (state > S_DRAIN)
+                $fatal(1, "matrix_engine: illegal state %0d", state);
+            // At most one in_last token travels to the corner at a time
+            if ((last_pipe & (last_pipe - 1'b1)) != '0)
+                $fatal(1, "matrix_engine: more than one in_last token in flight (%b)", last_pipe);
+            // ... and it exists exactly while the engine is draining
+            if (state != S_DRAIN && last_pipe != '0)
+                $fatal(1, "matrix_engine: in_last token in flight outside DRAIN (state %0d)", state);
+            if (state == S_DRAIN && last_pipe == '0)
+                $fatal(1, "matrix_engine: DRAIN without an in_last token in flight");
+            // Slices are only taken while streaming
+            if (accept && state != S_STREAM)
+                $fatal(1, "matrix_engine: slice accepted outside STREAM (state %0d)", state);
+            // A start that is taken must describe a tile that exists
+            if (start_ok && (tile_m > ROWS || tile_n > COLS))
+                $fatal(1, "matrix_engine: tile_m=%0d / tile_n=%0d exceed ROWS=%0d / COLS=%0d at start",
+                       tile_m, tile_n, ROWS, COLS);
+        end
+    end
+`endif
 
     // ------------------------------------------------------------------
     // Partial tiles: lanes beyond the tile are marked invalid, so the PEs

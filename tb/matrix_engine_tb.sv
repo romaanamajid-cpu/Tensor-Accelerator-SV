@@ -25,8 +25,21 @@
 //   - in_last on a cycle without in_valid (every bubble carries in_last = 1)
 //   - reset in the middle of a stream and in the middle of the drain
 //
-// ROWS / COLS are module parameters so other sizes can be run from the
-// command line, e.g.  iverilog -Pmatrix_engine_tb.ROWS=3 -Pmatrix_engine_tb.COLS=5 ...
+// M7: the testbench is width-aware. Operands span the full signed range of
+// DATA_WIDTH (OP_MIN..OP_MAX) and the golden model wraps every sum to
+// ACC_WIDTH bits (wrap_acc), exactly like the hardware accumulator.
+//
+// Accumulator wrap-around at engine level: the testbench deposits chosen
+// values straight into every PE accumulator (white-box, seed_accumulators)
+// while the engine is idle. Seeds sit just below the positive limit, just
+// above the negative limit, near zero or anywhere in the range, so a short
+// run is enough to push sums through the wrap point at ANY width, including
+// the default 8 / 32. Directed wrap tests plus a seeded random regression.
+//
+// ROWS / COLS / DATA_WIDTH / ACC_WIDTH are module parameters so other sizes
+// and widths can be run from the command line, e.g.
+//   iverilog -Pmatrix_engine_tb.ROWS=3 -Pmatrix_engine_tb.COLS=5 \
+//            -Pmatrix_engine_tb.DATA_WIDTH=6 -Pmatrix_engine_tb.ACC_WIDTH=12 ...
 module matrix_engine_tb;
 
     parameter ROWS       = 4;
@@ -36,6 +49,10 @@ module matrix_engine_tb;
     parameter K_MAX      = 8;    // longest inner dimension we drive (keep >= 6)
 
     localparam DRAIN = ROWS + COLS - 1;   // expected done latency after in_last
+
+    // Operand range follows DATA_WIDTH (signed): -2^(DW-1) .. 2^(DW-1)-1
+    localparam int OP_MIN = -(1 << (DATA_WIDTH - 1));
+    localparam int OP_MAX =  (1 << (DATA_WIDTH - 1)) - 1;
 
     // Protocol-abuse modes for run_tile()
     localparam int ABUSE_NONE         = 0;
@@ -101,7 +118,7 @@ module matrix_engine_tb;
     // ------------------------------------------------------------------
     int A_mat [ROWS][K_MAX];
     int B_mat [K_MAX][COLS];
-    int exp_c [ROWS][COLS];
+    longint exp_c [ROWS][COLS];
 
     int total_checks = 0;
     int total_fails  = 0;
@@ -119,7 +136,7 @@ module matrix_engine_tb;
     int cov_partial_cols   = 0;  // fewer than COLS active columns
     int cov_empty_tile     = 0;  // tile_m or tile_n = 0
     int cov_accum_no_clear = 0;  // run accumulated on top of the previous result
-    int cov_extreme_ops    = 0;  // run used -128 or 127 operands
+    int cov_extreme_ops    = 0;  // run used OP_MIN or OP_MAX operands
     int cov_neg_result     = 0;  // a PE was checked with a negative value
     int cov_pos_result     = 0;  // a PE was checked with a positive value
     int cov_back_to_back   = 0;  // start in the earliest legal cycle
@@ -129,12 +146,49 @@ module matrix_engine_tb;
     int cov_idle_junk      = 0;  // slices while idle
     int cov_reset_stream   = 0;  // reset mid-stream
     int cov_reset_drain    = 0;  // reset mid-drain
+    int cov_seeded         = 0;  // runs started from deposited accumulator values
+    int cov_wrap_pos       = 0;  // a sum wrapped past the positive limit
+    int cov_wrap_neg       = 0;  // a sum wrapped past the negative limit
     int bins_missed        = 0;  // coverage bins that were not hit
 
     integer rng_seed;
 
     function int rand_range(input int lo, input int hi);
         rand_range = lo + ($unsigned($random(rng_seed)) % (hi - lo + 1));
+    endfunction
+
+    // Wraps a value to ACC_WIDTH bits (signed), like the hardware accumulator
+    function longint wrap_acc(input longint v);
+        logic signed [63:0] t;
+        t = v;
+        if (ACC_WIDTH < 64) begin
+            t = t <<< (64 - ACC_WIDTH);
+            t = t >>> (64 - ACC_WIDTH);
+        end
+        wrap_acc = t;
+    endfunction
+
+    // Folds any integer into the operand range, so fixed test patterns stay
+    // legal at every DATA_WIDTH (values already in range are unchanged)
+    function int fit_op(input int v);
+        longint r, t;
+        r = longint'(OP_MAX) - OP_MIN + 1;
+        t = (longint'(v) - OP_MIN) % r;
+        if (t < 0) t += r;
+        fit_op = int'(t + OP_MIN);
+    endfunction
+
+    // Operand with a bias towards the values that break things: the range
+    // limits, -1, 0 and 1 (about 5 in 8), otherwise anywhere in the range
+    function int rand_op();
+        case (rand_range(0, 7))
+            0:       rand_op = OP_MIN;
+            1:       rand_op = OP_MAX;
+            2:       rand_op = -1;
+            3:       rand_op = 0;
+            4:       rand_op = 1;
+            default: rand_op = rand_range(OP_MIN, OP_MAX);
+        endcase
     endfunction
 
     function int imin(input int a, input int b);
@@ -199,8 +253,8 @@ module matrix_engine_tb;
     task automatic drive_junk_slice();
         in_valid = 1'b1;
         in_last  = 1'b1;
-        for (int i = 0; i < ROWS; i++) in_a[i] = rand_range(-128, 127);
-        for (int j = 0; j < COLS; j++) in_b[j] = rand_range(-128, 127);
+        for (int i = 0; i < ROWS; i++) in_a[i] = rand_range(OP_MIN, OP_MAX);
+        for (int j = 0; j < COLS; j++) in_b[j] = rand_range(OP_MIN, OP_MAX);
     endtask
 
     // Settings the engine must have captured at start; changed afterwards to
@@ -210,6 +264,19 @@ module matrix_engine_tb;
         accumulate = ~accumulate_i;
         tile_m     = '1;
         tile_n     = '1;
+    endtask
+
+    // Golden model: add one product to PE (i,j), wrapping to ACC_WIDTH bits
+    // and noting every time the sum really did wrap
+    task automatic acc_add(input int i, input int j, input longint prod);
+        longint raw, w;
+        raw = exp_c[i][j] + prod;
+        w   = wrap_acc(raw);
+        if (ACC_WIDTH < 64 && w != raw) begin
+            if (raw > 0) cov_wrap_pos++;
+            else         cov_wrap_neg++;
+        end
+        exp_c[i][j] = w;
     endtask
 
     task automatic clear_golden();
@@ -270,10 +337,10 @@ module matrix_engine_tb;
         if (abuse == ABUSE_SLICE_DRAIN)  cov_abuse_slice_d++;
         for (int i = 0; i < m_act; i++)
             for (int k = 0; k < k_len; k++)
-                if (A_mat[i][k] == -128 || A_mat[i][k] == 127) extreme = 1;
+                if (A_mat[i][k] == OP_MIN || A_mat[i][k] == OP_MAX) extreme = 1;
         for (int k = 0; k < k_len; k++)
             for (int j = 0; j < n_act; j++)
-                if (B_mat[k][j] == -128 || B_mat[k][j] == 127) extreme = 1;
+                if (B_mat[k][j] == OP_MIN || B_mat[k][j] == OP_MAX) extreme = 1;
         if (extreme) cov_extreme_ops++;
     endtask
 
@@ -350,7 +417,7 @@ module matrix_engine_tb;
         for (int i = 0; i < m_act; i++)
             for (int j = 0; j < n_act; j++)
                 for (int kk = 0; kk < k_len; kk++)
-                    exp_c[i][j] += A_mat[i][kk] * B_mat[kk][j];
+                    acc_add(i, j, longint'(A_mat[i][kk]) * B_mat[kk][j]);
 
         // --- wait for done. We are now in cycle T+1, T = cycle of in_last ---
         for (d = 1; d <= DRAIN + 1; d++) begin
@@ -490,17 +557,80 @@ module matrix_engine_tb;
     task automatic fill_pattern(input int salt);
         for (int i = 0; i < ROWS; i++)
             for (int k = 0; k < K_MAX; k++)
-                A_mat[i][k] = ((i*5 + k*3 + salt) % 17) - 8;
+                A_mat[i][k] = fit_op(((i*5 + k*3 + salt) % 17) - 8);
         for (int k = 0; k < K_MAX; k++)
             for (int j = 0; j < COLS; j++)
-                B_mat[k][j] = ((k*7 + j*2 + salt*3) % 15) - 7;
+                B_mat[k][j] = fit_op(((k*7 + j*2 + salt*3) % 15) - 7);
     endtask
 
     task automatic fill_random();
         for (int i = 0; i < ROWS; i++)
-            for (int k = 0; k < K_MAX; k++) A_mat[i][k] = rand_range(-128, 127);
+            for (int k = 0; k < K_MAX; k++) A_mat[i][k] = rand_range(OP_MIN, OP_MAX);
         for (int k = 0; k < K_MAX; k++)
-            for (int j = 0; j < COLS; j++) B_mat[k][j] = rand_range(-128, 127);
+            for (int j = 0; j < COLS; j++) B_mat[k][j] = rand_range(OP_MIN, OP_MAX);
+    endtask
+
+    // Like fill_random, but every operand comes from rand_op (limits, -1, 0, 1
+    // or anywhere in the range)
+    task automatic fill_mixed();
+        for (int i = 0; i < ROWS; i++)
+            for (int k = 0; k < K_MAX; k++) A_mat[i][k] = rand_op();
+        for (int k = 0; k < K_MAX; k++)
+            for (int j = 0; j < COLS; j++) B_mat[k][j] = rand_op();
+    endtask
+
+    // ------------------------------------------------------------------
+    // White-box accumulator seeding (accumulator wrap-around tests)
+    // The generate block hands every PE its own always block; ->seed_now makes
+    // them all write seed_flat into the PE accumulators. Call it only while
+    // the engine is idle (not tight after a run), a short time after a clock edge.
+    // ------------------------------------------------------------------
+    logic [ROWS*COLS*ACC_WIDTH-1:0] seed_flat;
+    event seed_now;
+
+    generate
+        for (genvar gi = 0; gi < ROWS; gi++) begin : g_seed_row
+            for (genvar gj = 0; gj < COLS; gj++) begin : g_seed_col
+                always @(seed_now)
+                    dut.u_array.g_row[gi].g_col[gj].u_pe.u_mac.acc_out =
+                        seed_flat[(gi*COLS + gj)*ACC_WIDTH +: ACC_WIDTH];
+            end
+        end
+    endgenerate
+
+    // mode 0: just below the positive limit, spread so that some PEs wrap
+    //         during a short run and some do not
+    // mode 1: just above the negative limit, same idea
+    // mode 2: random mix - near either limit, near zero, or anywhere
+    // The golden model is updated with the same values, then the PEs are
+    // compared with it (proves the deposit landed).
+    task automatic seed_accumulators(input string label, input int mode);
+        longint lim_pos, lim_neg, unit_p, v;
+        int idx, pick;
+        lim_pos = (longint'(1) << (ACC_WIDTH - 1)) - 1;
+        lim_neg = -(longint'(1) << (ACC_WIDTH - 1));
+        unit_p  = (longint'(OP_MAX) * OP_MAX) / 2;
+        if (unit_p < 1) unit_p = 1;
+        for (int i = 0; i < ROWS; i++) begin
+            for (int j = 0; j < COLS; j++) begin
+                idx  = i*COLS + j;
+                pick = (mode == 2) ? rand_range(0, 3) : mode;
+                case (pick)
+                    0: v = lim_pos - (mode == 2 ? rand_range(0, 40) : (idx % 11)) * unit_p;
+                    1: v = lim_neg + (mode == 2 ? rand_range(0, 40) : (idx % 11)) * unit_p;
+                    2: v = rand_range(-3, 3);
+                    default: begin
+                        v = {$random(rng_seed), $random(rng_seed)};
+                    end
+                endcase
+                exp_c[i][j] = wrap_acc(v);
+                seed_flat[(i*COLS + j)*ACC_WIDTH +: ACC_WIDTH] = exp_c[i][j];
+            end
+        end
+        -> seed_now;
+        #1;
+        cov_seeded++;
+        check_all({label, "-seeded"}, 1'b0);
     endtask
 
     // Constrained-random regression: random K, partial tiles, bubbles,
@@ -542,6 +672,34 @@ module matrix_engine_tb;
         end
     endtask
 
+    // Wrap-around regression: every run starts from deposited accumulator
+    // values and accumulates on top of them, with limit-biased operands.
+    // Inactive PEs (partial tiles) must keep their seeds untouched.
+    task automatic wrap_regression(input int num_runs, input int init_seed);
+        int k_len, m_act, n_act, stall_at, stall_len, abuse;
+        rng_seed = init_seed;
+        for (int r = 0; r < num_runs; r++) begin
+            k_len = rand_range(1, K_MAX);
+            m_act = ROWS;
+            n_act = COLS;
+            if (rand_range(0, 9) >= 7) begin
+                m_act = rand_range(1, ROWS);
+                n_act = rand_range(1, COLS);
+            end
+            stall_at  = -1;
+            stall_len = 0;
+            if (rand_range(0, 3) == 0) begin
+                stall_at  = rand_range(0, k_len - 1);
+                stall_len = rand_range(1, 3);
+            end
+            abuse = (rand_range(0, 3) == 0) ? rand_range(1, 3) : ABUSE_NONE;
+            fill_mixed();
+            seed_accumulators($sformatf("wrap-%0d", r), 2);
+            run_tile($sformatf("wrap-%0d", r), k_len, m_act, n_act,
+                     1'b1, stall_at, stall_len, abuse, 1'b0, 1'b0);
+        end
+    endtask
+
     task automatic report_bin(input string name, input int hits, input bit possible);
         if (!possible)      $display("  %-24s: n/a for this size", name);
         else if (hits > 0)  $display("  %-24s: %0d hits [HIT]", name, hits);
@@ -572,6 +730,9 @@ module matrix_engine_tb;
         report_bin("abuse: slices while idle", cov_idle_junk,      1);
         report_bin("reset mid-stream",         cov_reset_stream,   1);
         report_bin("reset mid-drain",          cov_reset_drain,    1);
+        report_bin("seeded accumulators",      cov_seeded,         1);
+        report_bin("wrap past positive limit", cov_wrap_pos,       ACC_WIDTH < 64);
+        report_bin("wrap past negative limit", cov_wrap_neg,       ACC_WIDTH < 64);
         $display("==============================================");
     endtask
 
@@ -613,12 +774,23 @@ module matrix_engine_tb;
         run_tile("pattern-full", K_MAX, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
 
         // Step 4: extreme operands
-        fill_const(-128, -128);
+        fill_const(OP_MIN, OP_MIN);
         run_tile("extreme-neg*neg", K_MAX, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
-        fill_const(-128, 127);
+        fill_const(OP_MIN, OP_MAX);
         run_tile("extreme-neg*pos", K_MAX, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
-        fill_const(127, 127);
+        fill_const(OP_MAX, OP_MAX);
         run_tile("extreme-pos*pos", K_MAX, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
+
+        // Step 4b: the same extremes with an ODD number of products. With an
+        // even K the largest product (OP_MIN*OP_MIN = 2^(2*DW-2)) can add up
+        // to exactly 2^ACC_WIDTH and wrap to zero, hiding a wrong product.
+        fill_const(OP_MIN, OP_MIN);
+        run_tile("extreme-neg*neg-K1", 1, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
+        run_tile("extreme-neg*neg-K5", 5, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
+        fill_const(OP_MIN, OP_MAX);
+        run_tile("extreme-neg*pos-K5", 5, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
+        fill_const(OP_MAX, OP_MAX);
+        run_tile("extreme-pos*pos-K5", 5, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
 
         // Step 5: K = 1 (single outer product)
         fill_pattern(3);
@@ -651,6 +823,27 @@ module matrix_engine_tb;
         fill_pattern(8);
         run_tile("accum-part3", 3, ROWS, COLS, 1, 1, 2, ABUSE_NONE, 0, 1);
 
+        // Step 9b: accumulator wrap-around at engine level. Accumulators are
+        // seeded next to a limit, then a short accumulating run pushes the
+        // sums over it. Golden = wrap_acc; wrap bins prove it really wrapped.
+        fill_const(OP_MAX, OP_MAX);
+        seed_accumulators("wrap-pos", 0);
+        run_tile("wrap-pos-up", 4, ROWS, COLS, 1, -1, 0, ABUSE_NONE, 0, 1);
+        // ...and back across the limit with negative products
+        fill_const(OP_MIN, OP_MAX);
+        run_tile("wrap-pos-back", 4, ROWS, COLS, 1, -1, 0, ABUSE_NONE, 0, 1);
+        fill_const(OP_MIN, OP_MAX);
+        seed_accumulators("wrap-neg", 1);
+        run_tile("wrap-neg-down", 4, ROWS, COLS, 1, -1, 0, ABUSE_NONE, 0, 1);
+        fill_const(OP_MAX, OP_MAX);
+        run_tile("wrap-neg-back", 4, ROWS, COLS, 1, -1, 0, ABUSE_NONE, 0, 1);
+        // wrap with partial tiles: inactive PEs keep their seeds
+        fill_const(OP_MAX, OP_MAX);
+        seed_accumulators("wrap-partial", 0);
+        run_tile("wrap-partial", 4, imax(1, ROWS - 1), imax(1, COLS - 1), 1, -1, 0, ABUSE_NONE, 0, 1);
+        // a clearing run wipes a wrapped accumulator
+        run_tile("wrap-then-clear", 3, ROWS, COLS, 0, -1, 0, ABUSE_NONE, 0, 1);
+
         // Step 10: protocol abuse - the engine must shrug all of this off
         fill_pattern(2);
         run_tile("abuse-start-in-stream", K_MAX, ROWS, COLS, 0, -1, 0, ABUSE_START_STREAM, 0, 1);
@@ -677,6 +870,9 @@ module matrix_engine_tb;
 
         // Step 13: constrained-random regression
         random_regression(200, 42);
+
+        // Step 14: accumulator wrap-around regression (seeded accumulators)
+        wrap_regression(80, 7);
 
         $display("==============================================");
         $display("SUMMARY: %0d / %0d checks passed (%0d failed)",

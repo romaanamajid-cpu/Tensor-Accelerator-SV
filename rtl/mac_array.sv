@@ -31,6 +31,17 @@ module mac_array #(
     output logic        [ROWS-1:0][COLS-1:0]                c_valid_out
 );
 
+    // ------------------------------------------------------------------
+    // Parameter legality checks (run once, at time 0). The width rules
+    // (DATA_WIDTH, ACC_WIDTH) are checked inside mac_unit.
+    // ------------------------------------------------------------------
+    initial begin
+        if (ROWS < 1)
+            $fatal(1, "mac_array: ROWS (%0d) must be >= 1", ROWS);
+        if (COLS < 1)
+            $fatal(1, "mac_array: COLS (%0d) must be >= 1", COLS);
+    end
+
     // Operand wires between PEs. Index [i][j] is the value ENTERING PE(i,j);
     // the extra column / row (index COLS / ROWS) catches what leaves the
     // right and bottom edges, which nothing uses.
