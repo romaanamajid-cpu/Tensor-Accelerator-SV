@@ -17,8 +17,8 @@ The core of the design is a parameterised MAC-array matrix-multiplication accele
 - [x] **M3** — MAC array
 - [x] **M4** — Matrix engine
 - [x] **M5** — Control / FSM
-- [ ] **M6** — Parameterisation *(current milestone)*
-- [ ] **M7** — Advanced verification
+- [x] **M6** — Parameterisation
+- [ ] **M7** — Advanced verification *(current milestone)*
 - [ ] **M8** — FPGA implementation
 - [ ] **M9** — Performance analysis
 - [ ] **M10** — PPA comparison
@@ -28,7 +28,7 @@ The core of the design is a parameterised MAC-array matrix-multiplication accele
 > Update the checkboxes above as each milestone is completed — this is the single source of truth for project status.
 
 ## Current status
-M1, M2, M3, M4 and M5 complete. Starting **M6: Parameterisation**.
+M1, M2, M3, M4, M5 and M6 complete. Starting **M7: Advanced verification**.
 
 M1 — MAC unit decisions:
 - Data width: 8-bit signed operands (INT8-style), parameterised via `DATA_WIDTH`
@@ -84,6 +84,16 @@ M5 — Control / FSM (`rtl/operand_buffer.sv`, `rtl/tile_ctrl.sv`, `rtl/tensor_c
 - Run (from the repo root): `iverilog -g2012 -o sim/tensor_core.vvp rtl/mac_unit.sv rtl/mac_pe.sv rtl/mac_array.sv rtl/skew_buffer.sv rtl/matrix_engine.sv rtl/operand_buffer.sv rtl/tile_ctrl.sv rtl/tensor_core.sv tb/tensor_core_tb.sv && vvp sim/tensor_core.vvp`
 - Buffer run: `iverilog -g2012 -o sim/operand_buffer.vvp rtl/operand_buffer.sv tb/operand_buffer_tb.sv && vvp sim/operand_buffer.vvp`
 - Regression at M5 sign-off (all passing): M2 `mac_unit_tb` 515/515, M3 `mac_array_tb` 3440/3440, `skew_buffer_tb` 2168/2168, M4 `matrix_engine_tb` 17329/17329, `operand_buffer_tb` 4089/4089, M5 `tensor_core_tb` 32200/32200
+
+M6 — Parameterisation (`rtl/mac_unit.sv`, `rtl/tensor_core.sv`, `tb/tensor_core_tb.sv`, `scripts/sweep.sh`):
+- Finding: ROWS / COLS / K_DEPTH were already free parameters since M3-M5. What was missing was parameter checking, and DATA_WIDTH / ACC_WIDTH coverage (the M5 testbench hardcoded 8-bit operands and a 32-bit golden model, so any other width reported failures that were testbench limits, not RTL bugs)
+- Legality rules: `mac_unit` needs DATA_WIDTH >= 2 and ACC_WIDTH >= 2*DATA_WIDTH; `tensor_core` needs ROWS, COLS, K_DEPTH >= 1. Checks are `initial` blocks with `$fatal` (time 0). Icarus 12 ignores `$error` inside `generate` blocks, hence `initial`. Icarus already rejects ACC_WIDTH < 2*DATA_WIDTH and size 0 at compile time, so those checks mainly give readable messages and protect other tools; DATA_WIDTH = 1 is only caught by the `$fatal`
+- Headroom warning (not fatal): `tensor_core` warns when ACC_WIDTH < 2*DATA_WIDTH + clog2(K_DEPTH), the width one job of K_DEPTH worst-case products needs to never wrap (20 at the defaults). Wrap-around stays legal (K-split jobs can outgrow it on purpose); the accumulator wraps, never saturates
+- Testbench: `tensor_core_tb` takes the operand range from DATA_WIDTH (`OP_MIN` / `OP_MAX`), keeps the golden model in `longint` and wraps it to ACC_WIDTH (`wrap_acc`), including the K-split full-product check. Same stimulus and checks otherwise: 32200/32200 at the defaults, and the same count at every width combination swept
+- Sweep (`bash scripts/sweep.sh` from the repo root, ~30 s, logs in `sim/sweep/`): 8 size combinations (1x1 K=1 up to 8x8 K=32), 12 width combinations (DATA_WIDTH 2..16, ACC_WIDTH 4..64, several tight enough to wrap), 4 mixed, 5 illegal settings that must be refused, and the five unit testbenches at their defaults. Result: 34 passed, 0 failed
+- Known limits: the sweep is only as strong as the M5 testbench (no new stimulus); DATA_WIDTH is limited to 31 bits and ACC_WIDTH to 64 by the testbench's integer / `longint` model; checks live only in `mac_unit` and `tensor_core`, not in the intermediate modules (skew_buffer, operand_buffer, etc. still accept degenerate values on their own); the sweep needs `bash` and `iverilog` on the PATH
+- Handed to later milestones: constrained-random / coverage-driven extensions and mutation re-runs at non-default sizes and widths (M7); sync-vs-async reset and block-RAM mapping (M8); per-parameter PPA numbers (M9/M10)
+- Run (from the repo root): `bash scripts/sweep.sh`
 
 ## Conventions
 - SystemVerilog (`.sv`) for all RTL and testbenches

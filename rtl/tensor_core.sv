@@ -58,6 +58,27 @@ module tensor_core #(
     // ------------------------------------------------------------------
     // Operand buffers: one word = one k-slice
     // ------------------------------------------------------------------
+        // ------------------------------------------------------------------
+    // Parameter legality checks (run once, at time 0). The width rules
+    // (DATA_WIDTH, ACC_WIDTH) are checked inside mac_unit.
+    // ------------------------------------------------------------------
+    initial begin
+        if (ROWS < 1)
+            $fatal(1, "tensor_core: ROWS (%0d) must be >= 1", ROWS);
+        if (COLS < 1)
+            $fatal(1, "tensor_core: COLS (%0d) must be >= 1", COLS);
+        if (K_DEPTH < 1)
+            $fatal(1, "tensor_core: K_DEPTH (%0d) must be >= 1", K_DEPTH);
+
+        // Accumulator headroom (warning only: wrap-around is legal, and a
+        // K-split across several jobs can outgrow this on purpose). One job
+        // of K_DEPTH worst-case products needs 2*DATA_WIDTH + clog2(K_DEPTH)
+        // bits to be sure it never wraps.
+        if (ACC_WIDTH < 2*DATA_WIDTH + $clog2(K_DEPTH))
+            $warning("tensor_core: ACC_WIDTH (%0d) < %0d: a job of K_DEPTH=%0d worst-case products can wrap around",
+                     ACC_WIDTH, 2*DATA_WIDTH + $clog2(K_DEPTH), K_DEPTH);
+    end
+    
     logic [ADDR_W-1:0]                      rd_addr;
     logic signed [ROWS-1:0][DATA_WIDTH-1:0] a_slice;
     logic signed [COLS-1:0][DATA_WIDTH-1:0] b_slice;

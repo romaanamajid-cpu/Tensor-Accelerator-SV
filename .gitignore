@@ -7,3 +7,5 @@ __pycache__/
 *.vcd
 *.vvp
 mac_sim
+sim/sweep/
+sim/sweep/

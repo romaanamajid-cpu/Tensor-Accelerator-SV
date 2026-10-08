@@ -53,6 +53,10 @@ module tensor_core_tb;
     parameter ACC_WIDTH  = 32;
     parameter K_DEPTH    = 16;
 
+    // Operand range follows DATA_WIDTH (signed): -2^(DW-1) .. 2^(DW-1)-1
+    localparam int OP_MIN = -(1 << (DATA_WIDTH - 1));
+    localparam int OP_MAX =  (1 << (DATA_WIDTH - 1)) - 1;
+
     localparam ADDR_W = (K_DEPTH > 1) ? $clog2(K_DEPTH) : 1;
     localparam K_W    = $clog2(K_DEPTH + 1);
     localparam M_W    = $clog2(ROWS + 1);
@@ -150,7 +154,7 @@ module tensor_core_tb;
     int B_mat [K_DEPTH][COLS];
     int A_big [ROWS][3*K_DEPTH];        // full-K operands for the chunking test
     int B_big [3*K_DEPTH][COLS];
-    int exp_c [ROWS][COLS];
+    longint exp_c [ROWS][COLS];
 
     int total_checks = 0;
     int total_fails  = 0;
@@ -203,6 +207,17 @@ module tensor_core_tb;
 
     function int rand_range(input int lo, input int hi);
         rand_range = lo + ($unsigned($random(rng_seed)) % (hi - lo + 1));
+    endfunction
+
+        // Wraps a value to ACC_WIDTH bits (signed), like the hardware accumulator
+    function longint wrap_acc(input longint v);
+        logic signed [63:0] t;
+        t = v;
+        if (ACC_WIDTH < 64) begin
+            t = t <<< (64 - ACC_WIDTH);
+            t = t >>> (64 - ACC_WIDTH);
+        end
+        wrap_acc = t;
     endfunction
 
     function int imin(input int a, input int b);
@@ -271,9 +286,9 @@ module tensor_core_tb;
 
     task automatic fill_random();
         for (int i = 0; i < ROWS; i++)
-            for (int k = 0; k < K_DEPTH; k++) A_mat[i][k] = rand_range(-128, 127);
+            for (int k = 0; k < K_DEPTH; k++) A_mat[i][k] = rand_range(OP_MIN, OP_MAX);
         for (int k = 0; k < K_DEPTH; k++)
-            for (int j = 0; j < COLS; j++) B_mat[k][j] = rand_range(-128, 127);
+            for (int j = 0; j < COLS; j++) B_mat[k][j] = rand_range(OP_MIN, OP_MAX);
     endtask
 
     task automatic fill_const(input int a_val, input int b_val);
@@ -313,7 +328,7 @@ module tensor_core_tb;
         for (int i = 0; i < m_act; i++)
             for (int j = 0; j < n_act; j++)
                 for (int k = 0; k < k_len; k++)
-                    exp_c[i][j] += A_mat[i][k] * B_mat[k][j];
+                    exp_c[i][j] = wrap_acc(exp_c[i][j] + longint'(A_mat[i][k]) * B_mat[k][j]);
     endtask
 
     // Compares every C[i][j] with the golden model
@@ -368,10 +383,10 @@ module tensor_core_tb;
         if (abuse_start_at == done_cyc)                            cov_abuse_done++;
         for (int i = 0; i < m_act; i++)
             for (int k = 0; k < k_len; k++)
-                if (A_mat[i][k] == -128 || A_mat[i][k] == 127) extreme = 1;
+                if (A_mat[i][k] == OP_MIN || A_mat[i][k] == OP_MAX) extreme = 1;
         for (int k = 0; k < k_len; k++)
             for (int j = 0; j < n_act; j++)
-                if (B_mat[k][j] == -128 || B_mat[k][j] == 127) extreme = 1;
+                if (B_mat[k][j] == OP_MIN || B_mat[k][j] == OP_MAX) extreme = 1;
         if (extreme) cov_extreme_ops++;
     endtask
 
@@ -381,7 +396,7 @@ module tensor_core_tb;
     task automatic check_stream_row(input string label, input int r, input int m_act,
                                     input int n_act);
         logic signed [ACC_WIDTH-1:0] got;
-        int expv;
+        longint expv;
         expect_bit(res_valid, 1'b1, {label, ": res_valid"});
         expect_bit(res_last,  (r == m_act - 1), {label, ": res_last"});
         total_checks++;
@@ -479,8 +494,8 @@ module tensor_core_tb;
             end
             if (cyc == abuse_ld_at) begin
                 drive_slice((abuse_ld_at <= k_len) ? k_len - 1 : 0);
-                for (int i = 0; i < ROWS; i++) ld_a[i] = rand_range(-128, 127);
-                for (int j = 0; j < COLS; j++) ld_b[j] = rand_range(-128, 127);
+                for (int i = 0; i < ROWS; i++) ld_a[i] = rand_range(OP_MIN, OP_MAX);
+                for (int j = 0; j < COLS; j++) ld_b[j] = rand_range(OP_MIN, OP_MAX);
             end
 
             if (cyc < last_cyc) begin
@@ -662,14 +677,15 @@ module tensor_core_tb;
     // compared with the full product computed directly from the whole matrices.
     // ------------------------------------------------------------------
     task automatic chunk_test(input string label, input int m_act, input int n_act);
-        int k_total, k_off, k_len, full;
+        int k_total, k_off, k_len;
+        longint full;
         logic signed [ACC_WIDTH-1:0] got;
 
         k_total = 2 * K_DEPTH + K_TRI;
         for (int i = 0; i < ROWS; i++)
-            for (int k = 0; k < k_total; k++) A_big[i][k] = rand_range(-128, 127);
+            for (int k = 0; k < k_total; k++) A_big[i][k] = rand_range(OP_MIN, OP_MAX);
         for (int k = 0; k < k_total; k++)
-            for (int j = 0; j < COLS; j++) B_big[k][j] = rand_range(-128, 127);
+            for (int j = 0; j < COLS; j++) B_big[k][j] = rand_range(OP_MIN, OP_MAX);
 
         k_off = 0;
         for (int c = 0; c < 3; c++) begin
@@ -687,9 +703,10 @@ module tensor_core_tb;
         for (int i = 0; i < m_act; i++) begin
             for (int j = 0; j < n_act; j++) begin
                 full = 0;
-                for (int k = 0; k < k_total; k++) full += A_big[i][k] * B_big[k][j];
-                got = c_flat[(i*COLS + j)*ACC_WIDTH +: ACC_WIDTH];
-                total_checks++;
+                for (int k = 0; k < k_total; k++) full += longint'(A_big[i][k]) * B_big[k][j];
+                    full = wrap_acc(full);
+                    got = c_flat[(i*COLS + j)*ACC_WIDTH +: ACC_WIDTH];
+                    total_checks++;
                 if (got !== full) begin
                     total_fails++;
                     $display("FAIL [%0s full-K]: C[%0d][%0d] = %0d, expected %0d",
@@ -788,13 +805,13 @@ module tensor_core_tb;
         run_full("K-mid", K_MID, 2);
 
         // Step 3: extreme operands
-        fill_const(-128, -128);
+        fill_const(OP_MIN, OP_MIN);
         load_buffers(K_DEPTH);
         run_full("extreme-neg*neg", K_DEPTH, 2);
-        fill_const(-128, 127);
+        fill_const(OP_MIN, OP_MAX);
         load_buffers(K_DEPTH);
         run_full("extreme-neg*pos", K_DEPTH, 2);
-        fill_const(127, 127);
+        fill_const(OP_MAX, OP_MAX);
         load_buffers(K_DEPTH);
         run_full("extreme-pos*pos", K_DEPTH, 2);
 
