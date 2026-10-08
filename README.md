@@ -1,8 +1,7 @@
 # Configurable Matrix-Multiplication Accelerator (SystemVerilog)
 
-Design, verification, and FPGA implementation of a parameterised
-MAC-array based matrix-multiplication accelerator, built from the
-ground up as a portfolio project for hardware/RTL/FPGA internships.
+Design, verification and FPGA implementation of a parameterised
+MAC-array based matrix-multiplication accelerator.
 
 ## Status
 Milestones 0-7 complete (RTL, verification, parameterisation, advanced
