@@ -10,3 +10,4 @@ mac_sim
 sim/sweep/
 sim/sweep/
 sim/mut/
+build/
