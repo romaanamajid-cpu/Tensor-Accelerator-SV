@@ -87,7 +87,7 @@ module matrix_engine #(
     assign busy        = (state != S_IDLE);
     assign done        = last_pipe[DRAIN_CYCLES-1];
 
-    always_ff @(posedge clk or negedge rst_n) begin
+    always_ff @(posedge clk) begin
         if (!rst_n) begin
             state     <= S_IDLE;
             tile_m_r  <= '0;

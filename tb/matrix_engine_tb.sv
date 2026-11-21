@@ -524,6 +524,7 @@ module matrix_engine_tb;
 
         // Asynchronous reset with the stream still "live"
         rst_n = 1'b0;
+        @(posedge clk);     // synchronous reset: takes effect on this edge
         #1;
         expect_idle({label, "-at-reset"});
         clear_golden();

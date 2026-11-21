@@ -77,6 +77,7 @@ module skew_buffer_tb;
         in_data  = '0;
         in_valid = '0;
         rst_n    = 0;
+        @(posedge clk);     // synchronous reset: takes effect on this edge
         #1;
         for (int i = 0; i < LANES; i++) begin
             total_checks++;

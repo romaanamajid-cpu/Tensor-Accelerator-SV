@@ -586,6 +586,7 @@ module tensor_core_tb;
 
         // Pull reset (asynchronous: checked straight away, no clock edge)
         rst_n = 1'b0;
+        @(posedge clk);     // synchronous reset: takes effect on this edge
         #1;
         expect_bit(busy,      1'b0, {label, ": busy during reset"});
         expect_bit(job_done,  1'b0, {label, ": job_done during reset"});

@@ -40,7 +40,7 @@ module mac_unit #(
     assign product = a * b;
 
     // Registered accumulate
-    always_ff @(posedge clk or negedge rst_n) begin
+    always_ff @(posedge clk) begin
         if (!rst_n) begin
             acc_out   <= '0;
             valid_out <= 1'b0;

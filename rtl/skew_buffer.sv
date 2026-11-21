@@ -46,7 +46,7 @@ module skew_buffer #(
                 logic signed [DATA_WIDTH-1:0] data_pipe  [i];
                 logic                         valid_pipe [i];
 
-                always_ff @(posedge clk or negedge rst_n) begin
+                always_ff @(posedge clk) begin
                     if (!rst_n) begin
                         for (int s = 0; s < i; s++) begin
                             data_pipe [s] <= '0;

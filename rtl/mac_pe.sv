@@ -35,7 +35,7 @@ module mac_pe #(
 
     // One register stage of forwarding per PE -> neighbours see our operands
     // exactly one cycle after we do.
-    always_ff @(posedge clk or negedge rst_n) begin
+    always_ff @(posedge clk) begin
         if (!rst_n) begin
             a_out       <= '0;
             a_valid_out <= 1'b0;

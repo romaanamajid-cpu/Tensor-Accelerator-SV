@@ -140,9 +140,10 @@ module mac_unit_tb;
         a = 0; b = 0;
         expected_acc = 0;
 
-        // Step 1: release reset, check zeroed state
+        // Step 1: release reset (synchronous: let one clock edge see it low
+        // first), check zeroed state
         @(posedge clk);
-        rst_n = 1;
+        #1 rst_n = 1;
         @(posedge clk);
         check_acc("post-reset");
 

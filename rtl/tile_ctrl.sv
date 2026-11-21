@@ -149,7 +149,7 @@ module tile_ctrl #(
     end
 `endif
 
-    always_ff @(posedge clk or negedge rst_n) begin
+    always_ff @(posedge clk) begin
         if (!rst_n) begin
             state   <= S_IDLE;
             k_len   <= '0;
